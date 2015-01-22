@@ -4,6 +4,7 @@ from __future__ import absolute_import, division, \
 import signal
 import time
 import urlparse
+import re
 import eventloop
 import errno
 import socket
@@ -56,6 +57,7 @@ class RequestTask(object):
             "method": "GET",
             "task_id": None,
             "url": None,
+            "remote": None,
             "cookie": None,
             "callback": None,
             "socket": None,
@@ -80,14 +82,19 @@ class RequestTask(object):
             pass
 
     def __str__(self):
-        return "url:%s\nmethon:%s\nreason:%s\nlast_active:%s" % \
+        return "url:%s\nmethon:%s\nreason:%s\nproxy:%s\nlast_active:%s" % \
             (self.task_info["url"],
              self.task_info["method"],
              self.task_info["reason"],
+             self.task_info["proxy"],
              self.task_info["last_active_time"]
              )
 
     def destroy(self):
+        self.task_info["last_active_time"] = None
+        self.task_info["task_id"] = None
+        self.task_info["send_buf"] = ""
+        self.task_info["recv_buf"] = ""
         if self.task_info["socket"]:
             self.do_ig_ep(self.task_info["socket"].shutdown, socket.SHUT_RDWR)
             self.do_ig_ep(self.task_info["socket"].close)
@@ -114,8 +121,8 @@ class EventHttp(object):
         }
         self.conf = {
             "buf_size": 32 * 1024,
-            "verbose": True,
-            "task_timeout": 10,
+            "verbose": False,
+            "task_timeout": 5,
             "max_concurrent_tasks": 1000,
         }
 
@@ -167,23 +174,28 @@ class EventHttp(object):
         return "".join(content)
 
     def _remove_task(self, task, why=None):
-        current_time = time.time()
-        c = current_time - task.task_info["last_active_time"]
-        print "Time :%s" % c
         task.task_info["reason"] = why
         logger.debug('Remove task %s' % task)
         task_id = task.task_info["task_id"]
         if task_id not in self.running_tasks:
+            logger.error("Taks id not in tasks")
             return
         if why and task.task_info["retry"]:
+            logger.debug("Remove %s" % why)
             self.failed_tasks.append(task)
         _socket = task.task_info["socket"]
-        if _socket:
-            self.eventloop.remove(_socket)
-            del self.socket2task[_socket]
-        task.destroy()
-        self.concurrent_tasks -= 1
-        del self.running_tasks[task_id]
+        try:
+            if _socket:
+                try:
+                    self.eventloop.remove(_socket)
+                except Exception as e:
+                    logger.error("Remove err %s" % e)
+                del self.socket2task[_socket]
+            task.destroy()
+            self.concurrent_tasks -= 1
+            del self.running_tasks[task_id]
+        except Exception as e:
+            logger.error("Destory %s" % e)
 
     def _create_socket_and_register(self, task):
         try:
@@ -194,6 +206,9 @@ class EventHttp(object):
                                eventloop.POLL_ERR)
         except Exception as e:
             self._remove_task(task, why="Create socket: %s" % e)
+            return None
+        if not _socket:
+            self._remove_task(task, why="Create socket err" )
             return None
         self.socket2task[_socket] = task
         task.task_info["socket"] = _socket
@@ -215,15 +230,14 @@ class EventHttp(object):
         except Exception as e:
             self._remove_task(task, why="Generate req content err %s" % e)
             return
-        self._create_socket_and_register(task)
-        task.task_info["send_buf"] = req_content
-        task.task_info["status"] = self.HTTPSTATUS["STATUS_CONNECTED"]
         self._active_task(task)
+        task.task_info["send_buf"] = req_content
+        self._create_socket_and_register(task)
 
     def _active_task(self, task):
         task.task_info["last_active_time"] = time.time()
 
-    def _sweep_timeout(self, signum, frame):
+    def _sweep_timeout(self, signum=None, frame=None):
         current_time = time.time()
         if current_time - self.last_check_time > self.conf["task_timeout"]:
             self.last_check_time = current_time
@@ -238,7 +252,11 @@ class EventHttp(object):
 
     def _handle_events(self, events):
         for _socket, fd, event in events:
-            task = self.socket2task[_socket]
+            try:
+                task = self.socket2task[_socket]
+            except:
+                import pdb
+                pdb.set_trace()
             if task.task_info["task_id"] not in self.running_tasks:
                 self._remove_task(task, why="Not valid task")
                 raw_input()
@@ -246,6 +264,7 @@ class EventHttp(object):
             if event & eventloop.POLL_ERR:
                 logger.debug("Event err hup")
                 self._remove_task(task, why="Epoll err")
+                continue
             if event & eventloop.POLL_OUT:
                 logger.debug("Event out")
                 self._send_data(task)
@@ -305,10 +324,10 @@ class EventHttp(object):
         if not data:
             func = task.task_info["callback"]
             try:
-                logger.debug("Doing func %s" % func)
                 func(task)
             except:
                 self._remove_task(task, why="Call back err")
+                return 
             else:
                 logger.debug("Finish remove task")
                 self._remove_task(task)  # Finish
@@ -317,13 +336,14 @@ class EventHttp(object):
 
     def _process_tasks(self):
         self.last_check_time = time.time()
-        signal.setitimer(signal.ITIMER_REAL, 1, 3)
-        signal.signal(signal.SIGALRM, self._sweep_timeout)
+        # signal.setitimer(signal.ITIMER_REAL, 1, 3)
+        # signal.signal(signal.SIGALRM, self._sweep_timeout)
         while True:
             self.eventloop.single_run()
+            self._sweep_timeout()
             if self.concurrent_tasks < 1:
                 break
-        signal.setitimer(signal.ITIMER_REAL, 0, 0)
+        # signal.setitimer(signal.ITIMER_REAL, 0, 0)
 
     def dispatch_tasks(self, tasks):
         self.failed_tasks = []
@@ -341,19 +361,42 @@ class EventHttp(object):
         self.failed_tasks.extend(tasks[pos + 1:])
         self.eventloop.add_handler(self._handle_events)
         self._process_tasks()
+        self.eventloop.remove_handler(self._handle_events)
         return self.failed_tasks
 
     def do_until_done(self, tasks):
-        ans = self.dispatch_tasks(tasks)
-        while ans:
-            logger.debug("Loop %s " % len(ans))
-            ans = self.dispatch_tasks(tasks)
+        from ip_pool.IpClient import IpClient
+        ipc = IpClient()
+        ips = ipc.getIps(100)
+        while tasks:
+            for task in tasks:
+                ip = random.choice(ips.keys())
+                port = int(ips[ip]) - 100000
+                task.task_info["proxy"] = "http://%s:%s" % (ip, port)
+            tasks = self.dispatch_tasks(tasks)
+            logger.info("Loop after %s " % len(tasks))
 
+task_count = 0
 
 def cb(task):
-    print task
-    print "buf\n", len(task.task_info['recv_buf'])
-    print "buf\n", task.task_info['recv_buf']
+    global task_count
+    task_count += 1
+    url = task.task_info["url"]
+    print "Done %s %s" % (url, task_count)
+    content = task.task_info["recv_buf"]
+    u = re.findall(r'p=(.*)', url)[0]
+    try:
+        r = re.findall(r'"p": "(\d+)"', content)[0]
+    except:
+        return 
+    if r != u:
+        print "Req: %s " % u
+        print "Rep: %s " % r
+        print "%s Not Ok" % task
+        import pdb
+        pdb.set_trace()
+    else:
+        pass
 
 if __name__ == "__main__":
     task = RequestTask(url="http://httpbin.org/get?p=%s" % random.random(),
@@ -368,12 +411,11 @@ if __name__ == "__main__":
                        callback=cb
                        )
     # tasks.append(task)
-    for i in xrange(10):
-        task = RequestTask(url="http://httpbin.org/get?p=%s" % random.random(),
+    for i in xrange(20000):
+        task = RequestTask(url="http://httpbin.org/get?p=%s" % random.randint(1, 100),
                            method="GET",
                            callback=cb,
                            cookie={1: 21, "dfda": 123, },
-                           proxy="http://117.168.131.114:8123"
                            )
         tasks.append(task)
     pool = EventHttp()

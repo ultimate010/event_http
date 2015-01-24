@@ -42,6 +42,13 @@ class HttpHelper(object):
             header_line.append("%s: %s\r\n" % (k, v))
         return request_line + "".join(header_line)
 
+    @staticmethod
+    def do_ig_ep(func, *args, **kwargs):
+        try:
+            func(*args, **kwargs)
+        except:
+            pass
+
 
 class RequestTask(object):
     def __init__(self, **kwargs):
@@ -75,12 +82,6 @@ class RequestTask(object):
         for k, v in kwargs.items():
             self.task_info[k] = v
 
-    def do_ig_ep(self, func, *args, **kwargs):
-        try:
-            func(*args, **kwargs)
-        except:
-            pass
-
     def __str__(self):
         return "url:%s\nmethon:%s\nreason:%s\nproxy:%s\nlast_active:%s" % \
             (self.task_info["url"],
@@ -96,8 +97,8 @@ class RequestTask(object):
         self.task_info["send_buf"] = ""
         self.task_info["recv_buf"] = ""
         if self.task_info["socket"]:
-            self.do_ig_ep(self.task_info["socket"].shutdown, socket.SHUT_RDWR)
-            self.do_ig_ep(self.task_info["socket"].close)
+            HttpHelper.do_ig_ep(self.task_info["socket"].shutdown, socket.SHUT_RDWR)
+            HttpHelper.do_ig_ep(self.task_info["socket"].close)
             self.task_info["socket"] = None
 
 
@@ -181,7 +182,7 @@ class EventHttp(object):
         if task_id not in self.running_tasks:
             logger.error("Taks id not in tasks")
             return
-        if why and task.task_info["retry"]:
+        if task.task_info["retry"]:
             logger.debug("Remove %s" % why)
             self.failed_tasks.append(task)
         _socket = task.task_info["socket"]

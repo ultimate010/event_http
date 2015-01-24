@@ -182,7 +182,7 @@ class EventHttp(object):
         if task_id not in self.running_tasks:
             logger.error("Taks id not in tasks")
             return
-        if task.task_info["retry"]:
+        if why and task.task_info["retry"]:
             logger.debug("Remove %s" % why)
             self.failed_tasks.append(task)
         _socket = task.task_info["socket"]

@@ -98,6 +98,7 @@ class RequestTask(object):
         if self.task_info["socket"]:
             self.do_ig_ep(self.task_info["socket"].shutdown, socket.SHUT_RDWR)
             self.do_ig_ep(self.task_info["socket"].close)
+            self.task_info["socket"] = None
 
 
 class EventHttp(object):
@@ -184,18 +185,21 @@ class EventHttp(object):
             logger.debug("Remove %s" % why)
             self.failed_tasks.append(task)
         _socket = task.task_info["socket"]
+        self.concurrent_tasks -= 1
+        del self.running_tasks[task_id]
+        if not _socket:
+            # Not init socket
+            return 
         try:
-            if _socket:
-                try:
-                    self.eventloop.remove(_socket)
-                except Exception as e:
-                    logger.error("Remove err %s" % e)
-                del self.socket2task[_socket]
+            try:
+                self.eventloop.remove(_socket)
+            except Exception as e:
+                logger.error("Remove err %s %s" % (e, why))
             task.destroy()
-            self.concurrent_tasks -= 1
-            del self.running_tasks[task_id]
+            del self.socket2task[_socket]
+            del _socket
         except Exception as e:
-            logger.error("Destory %s" % e)
+            logger.error("Destory err %s %s" % (e, why))
 
     def _create_socket_and_register(self, task):
         try:
